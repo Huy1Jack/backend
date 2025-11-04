@@ -1737,5 +1737,126 @@ def del_authors():
 
 
 
+@app.route("/api/edit_authors", methods=["POST"])
+def edit_authors():
+    data = request.get_json()
+
+    # ✅ Kiểm tra API key
+    if data.get("api_key") != API_KEY:
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "API key không hợp lệ."
+        }), 403
+
+    # ✅ Giải mã token
+    token = data.get("token")
+    role_id = None
+
+    if token:
+        try:
+            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            role_id = decoded.get("role")
+        except jwt.ExpiredSignatureError:
+            return jsonify({
+                "status": 401,
+                "success": False,
+                "message": "Token hết hạn."
+            }), 401
+        except jwt.InvalidTokenError:
+            return jsonify({
+                "status": 401,
+                "success": False,
+                "message": "Token không hợp lệ."
+            }), 401
+    else:
+        return jsonify({
+            "status": 401,
+            "success": False,
+            "message": "Thiếu token xác thực."
+        }), 401
+
+    # ✅ Chỉ role_id = 1 hoặc 2 được phép chỉnh sửa tác giả
+    if role_id not in [1, 2]:
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "Bạn không có quyền chỉnh sửa thông tin tác giả."
+        }), 403
+
+    # ✅ Lấy dữ liệu người dùng gửi lên
+    datauser = data.get("datauser")
+    if not datauser:
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "Thiếu dữ liệu datauser."
+        }), 400
+
+    author_id = datauser.get("author_id")
+    author_name = datauser.get("author_name")
+    biography = datauser.get("biography")
+    birth_year = datauser.get("birth_year")
+    death_year = datauser.get("death_year")
+
+    # ✅ Kiểm tra dữ liệu bắt buộc
+    if not author_id or not author_name:
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "Thiếu thông tin bắt buộc (author_id hoặc author_name)."
+        }), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ Kiểm tra tác giả có tồn tại không
+        cursor.execute("SELECT * FROM authors WHERE author_id = %s", (author_id,))
+        author = cursor.fetchone()
+
+        if not author:
+            return jsonify({
+                "status": 404,
+                "success": False,
+                "message": "Không tìm thấy tác giả với ID này."
+            }), 404
+
+        # ✅ Cập nhật thông tin tác giả (xử lý None cho death_year)
+        cursor.execute("""
+            UPDATE authors
+            SET author_name = %s,
+                biography = %s,
+                birth_year = %s,
+                death_year = %s
+            WHERE author_id = %s
+        """, (author_name, biography, birth_year, death_year, author_id))
+        conn.commit()
+
+        # ✅ Lấy lại dữ liệu sau khi cập nhật để trả về
+        cursor.execute("SELECT * FROM authors WHERE author_id = %s", (author_id,))
+        updated_author = cursor.fetchone()
+
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Cập nhật thông tin tác giả thành công.",
+            "updated_author": updated_author
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({
+            "status": 500,
+            "success": False,
+            "message": f"Lỗi máy chủ: {str(e)}"
+        }), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, debug=DEBUG)
