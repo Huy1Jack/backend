@@ -168,7 +168,6 @@ def forgot_password():
         return jsonify({"status": 403, "message": "API key không hợp lệ"}), 403
 
     datauser = data["datauser"]
-    print(datauser)
     email = datauser.get("email")
 
     if not email:
@@ -540,7 +539,6 @@ def show_book_reviews():
         }), 200
 
     except Exception as e:
-        print(e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -552,9 +550,114 @@ def show_book_reviews():
         conn.close()
 
 
-
 @app.route("/api/get_book_admin", methods=["POST"])
 def get_book_admin():
+    data = request.get_json()
+    if data.get("api_key") != API_KEY:
+        return jsonify({"success": False, "message": "API key không hợp lệ."}), 403
+
+    token = data.get("token")
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        email_user = decoded.get("email")
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Lỗi xác thực token: {e}"}), 401
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        base_query = """
+            SELECT 
+                b.books_id,
+                b.Title,
+                b.Description,
+                b.ISBN,
+                b.PublishYear,
+                b.Language,
+                b.DocumentType,
+                b.UploadDate,
+                b.UploadedBy,
+                b.IsPublic,
+                b.image,
+                b.publisher_id,
+                b.category_id,
+                c.category_name,
+                p.publisher_name,
+                GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors,
+                GROUP_CONCAT(a.author_id SEPARATOR ',') AS author_ids
+            FROM books b
+            LEFT JOIN categories c ON b.category_id = c.category_id
+            LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
+            LEFT JOIN book_authors ba ON b.books_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
+        """
+
+        if role_id == 1:
+            cursor.execute(base_query + " GROUP BY b.books_id ORDER BY b.books_id DESC")
+        elif role_id == 2:
+            cursor.execute(base_query + " WHERE b.UploadedBy = %s GROUP BY b.books_id ORDER BY b.books_id DESC", (email_user,))
+        else:
+            return jsonify({"success": False, "message": "Bạn không có quyền xem danh sách sách."}), 403
+
+        books = cursor.fetchall()
+
+        # Format author_ids → list[int]
+        for b in books:
+            b["author_ids"] = [int(x) for x in b["author_ids"].split(",")] if b.get("author_ids") else []
+
+        return jsonify({"success": True, "data": books}), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.route("/api/del_book_admin", methods=["POST"])
+def del_book_admin():
+    data = request.get_json()
+    if data.get("api_key") != API_KEY:
+        return jsonify({"success": False, "message": "API key không hợp lệ."}), 403
+
+    token = data.get("token")
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        email_user = decoded.get("email")
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Token lỗi: {e}"}), 401
+
+    datauser = data.get("datauser", {})
+    books_id = datauser.get("books_id")
+    if not books_id:
+        return jsonify({"success": False, "message": "Thiếu books_id"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        if role_id == 1:
+            cursor.execute("DELETE FROM books WHERE books_id=%s", (books_id,))
+        elif role_id == 2:
+            cursor.execute("DELETE FROM books WHERE books_id=%s AND UploadedBy=%s", (books_id, email_user))
+        else:
+            return jsonify({"success": False, "message": "Không có quyền xóa."}), 403
+
+        conn.commit()
+        return jsonify({"success": True, "message": "Xóa sách thành công."}), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/add_book_admin1", methods=["POST"])
+def add_book_admin():
     data = request.get_json()
 
     # ✅ Kiểm tra API key
@@ -562,161 +665,23 @@ def get_book_admin():
         return jsonify({
             "status": 403,
             "success": False,
-            "message": "API key không hợp lệ."
+            "message": "API key không hợp lệ"
         }), 403
+
+    # ✅ Lấy dữ liệu người dùng gửi lên
+    datauser = data.get("datauser")
+    if not datauser:
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "Thiếu dữ liệu datauser."
+        }), 400
 
     token = data.get("token")
     role_id = None
     email_user = None
 
     # ✅ Giải mã token
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
-    else:
-        return jsonify({
-            "status": 401,
-            "success": False,
-            "message": "Thiếu token xác thực."
-        }), 401
-
-    # ✅ Nếu không có role_id thì từ chối
-    if role_id is None:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu thông tin role trong token."
-        }), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        # ✅ role_id = 1 → Lấy toàn bộ sách
-        if role_id == 1:
-            cursor.execute("""
-                SELECT 
-                    b.books_id,
-                    b.Title,
-                    b.Description,
-                    b.ISBN,
-                    b.PublishYear,
-                    b.Language,
-                    b.DocumentType,
-                    b.UploadDate,
-                    b.UploadedBy,
-                    b.IsPublic,
-                    b.image,
-                    c.category_name,
-                    p.publisher_name,
-                    GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
-                FROM books b
-                LEFT JOIN categories c ON b.category_id = c.category_id
-                LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
-                LEFT JOIN book_authors ba ON b.books_id = ba.book_id
-                LEFT JOIN authors a ON ba.author_id = a.author_id
-                GROUP BY b.books_id
-                ORDER BY b.books_id DESC
-            """)
-            result = cursor.fetchall()
-
-        # ✅ role_id = 2 → Lấy sách do chính người dùng upload
-        elif role_id == 2:
-            cursor.execute("""
-                SELECT 
-                    b.books_id,
-                    b.Title,
-                    b.Description,
-                    b.ISBN,
-                    b.PublishYear,
-                    b.Language,
-                    b.DocumentType,
-                    b.UploadDate,
-                    b.UploadedBy,
-                    b.IsPublic,
-                    b.image,
-                    c.category_name,
-                    p.publisher_name,
-                    GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
-                FROM books b
-                LEFT JOIN categories c ON b.category_id = c.category_id
-                LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
-                LEFT JOIN book_authors ba ON b.books_id = ba.book_id
-                LEFT JOIN authors a ON ba.author_id = a.author_id
-                WHERE b.UploadedBy = %s
-                GROUP BY b.books_id
-                ORDER BY b.books_id DESC
-            """, (email_user,))
-            result = cursor.fetchall()
-
-        # ✅ role_id = 3 → Không có quyền xem
-        else:
-            return jsonify({
-                "status": 403,
-                "success": False,
-                "message": "Bạn không có quyền truy cập dữ liệu này."
-            }), 403
-
-        # ✅ Trả kết quả
-        return jsonify({
-            "status": 200,
-            "success": True,
-            "data": result
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            "status": 500,
-            "success": False,
-            "message": f"Lỗi máy chủ: {str(e)}"
-        }), 500
-
-    finally:
-        cursor.close()
-        conn.close()
-
-
-
-@app.route("/api/del_book_admin", methods=["POST"])
-def del_book_admin():
-    data = request.get_json()
-
-    #   Kiểm tra API key
-    if data.get("api_key") != API_KEY:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "API key không hợp lệ"
-        }), 403
-
-    #   Lấy thông tin người dùng gửi lên
-    datauser = data.get("datauser")
-    if not datauser:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu dữ liệu datauser"
-        }), 400
-
-    books_id = datauser.get("books_id")
-    if not books_id:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu mã sách (books_id)"
-        }), 400
-
-    token = data.get("token")
-    role_id = None
-    email_user = None
-
-    #   Giải mã token
     if token:
         try:
             decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
@@ -739,62 +704,46 @@ def del_book_admin():
             "message": "Thiếu token xác thực."
         }), 401
 
-    #   Kiểm tra role
-    if role_id not in [1, 2, 3]:
+    # ✅ Chỉ role_id = 1 và 2 được phép thêm
+    if role_id not in [1, 2]:
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "Bạn không có quyền thêm sách."
+        }), 403
+
+    # ✅ Lấy thông tin sách từ datauser
+    title = datauser.get("Title")
+    publish_year = datauser.get("PublishYear")
+    language = datauser.get("Language")
+    document_type = datauser.get("DocumentType")
+    author_id = datauser.get("author_id")
+    category_id = datauser.get("category_id")
+
+    # ✅ Kiểm tra dữ liệu bắt buộc
+    if not all([title, publish_year, language, document_type, author_id, category_id]):
         return jsonify({
             "status": 400,
             "success": False,
-            "message": "Role không hợp lệ."
+            "message": "Thiếu thông tin bắt buộc để thêm sách."
         }), 400
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        #   role_id = 1 → Có thể xóa bất kỳ sách nào
-        if role_id == 1:
-            cursor.execute("DELETE FROM books WHERE books_id = %s", (books_id,))
-            conn.commit()
-            return jsonify({
-                "status": 200,
-                "success": True,
-                "message": f"Đã xóa sách có ID {books_id}."
-            }), 200
+        # ✅ Thêm sách vào bảng books
+        cursor.execute("""
+            INSERT INTO books (Title, PublishYear, Language, DocumentType, author_id, category_id, email)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (title, publish_year, language, document_type, author_id, category_id, email_user))
+        conn.commit()
 
-        #   role_id = 2 → Chỉ được xóa sách do chính người đó thêm
-        elif role_id == 2:
-            cursor.execute("SELECT email FROM books WHERE books_id = %s", (books_id,))
-            book = cursor.fetchone()
-
-            if not book:
-                return jsonify({
-                    "status": 404,
-                    "success": False,
-                    "message": "Không tìm thấy sách cần xóa."
-                }), 404
-
-            if book["email"] != email_user:
-                return jsonify({
-                    "status": 403,
-                    "success": False,
-                    "message": "Bạn không có quyền xóa sách này."
-                }), 403
-
-            cursor.execute("DELETE FROM books WHERE books_id = %s", (books_id,))
-            conn.commit()
-            return jsonify({
-                "status": 200,
-                "success": True,
-                "message": f"Đã xóa sách có ID {books_id} của bạn."
-            }), 200
-
-        #   role_id = 3 → Không có quyền xóa
-        elif role_id == 3:
-            return jsonify({
-                "status": 403,
-                "success": False,
-                "message": "Bạn không có quyền xóa sách."
-            }), 403
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Thêm sách thành công."
+        }), 200
 
     except Exception as e:
         conn.rollback()
@@ -808,76 +757,114 @@ def del_book_admin():
         cursor.close()
         conn.close()
 
-
-@app.route("/api/get_authors_and_categories", methods=["POST"])
-def get_authors_and_categories():
-    data = request.get_json()
-
-    #   Kiểm tra API key
+@app.route("/api/edit_book_admin", methods=["POST"])
+def edit_book_admin():
+    data = request.get_json(force=True)
+    # ✅ 1. Kiểm tra API key
     if data.get("api_key") != API_KEY:
         return jsonify({
-            "status": 403,
             "success": False,
-            "message": "API key không hợp lệ"
+            "message": "API key không hợp lệ."
         }), 403
 
+    # ✅ 2. Giải mã token
     token = data.get("token")
-    role_id = None
-    email_user = None
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        email_user = decoded.get("email")
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Lỗi token: {e}"}), 401
 
-    #   Giải mã token
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({
-                "success": False,
-                "message": "Token hết hạn."
-            }), 401
-        except jwt.InvalidTokenError:
-            return jsonify({
-                "success": False,
-                "message": "Token không hợp lệ."
-            }), 401
-    else:
-        return jsonify({
-            "status": 401,
-            "success": False,
-            "message": "Thiếu token xác thực."
-        }), 401
-
-    #   Kiểm tra role
+    # ✅ 3. Kiểm tra quyền
     if role_id not in [1, 2]:
         return jsonify({
-            "status": 403,
             "success": False,
-            "message": "Bạn không có quyền truy cập dữ liệu này."
+            "message": "Bạn không có quyền chỉnh sửa sách."
         }), 403
+
+    # ✅ 4. Chuẩn hóa cấu trúc dữ liệu (bóc tách nếu lồng nhiều lớp)
+    datauser = data.get("datauser")
+    while isinstance(datauser, dict) and "datauser" in datauser:
+        datauser = datauser.get("datauser")
+
+    if not datauser:
+        return jsonify({
+            "success": False,
+            "message": "Thiếu dữ liệu datauser."
+        }), 400
+
+    # ✅ 5. Lấy thông tin sách
+    books_id = datauser.get("books_id")
+    author_ids = datauser.get("author_ids")
+
+    if not books_id or not author_ids:
+        return jsonify({
+            "success": False,
+            "message": "Thiếu books_id hoặc tác giả."
+        }), 400
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        #   Lấy toàn bộ dữ liệu bảng authors
-        cursor.execute("SELECT * FROM authors")
-        authors = cursor.fetchall()
+        # ✅ 6. Cập nhật bảng books
+        cursor.execute("""
+            UPDATE books
+            SET Title=%s, Description=%s, ISBN=%s, PublishYear=%s, Language=%s, DocumentType=%s,
+                publisher_id=%s, category_id=%s, UploadedBy=%s, image=%s, IsPublic=%s
+            WHERE books_id=%s
+        """, (
+            datauser.get("Title"),
+            datauser.get("Description"),
+            datauser.get("ISBN"),
+            datauser.get("PublishYear"),
+            datauser.get("Language"),
+            datauser.get("DocumentType"),
+            datauser.get("publisher_id"),
+            datauser.get("category_id"),
+            email_user,
+            datauser.get("image"),
+            datauser.get("IsPublic", 1),
+            books_id
+        ))
+        conn.commit()
 
-        #   Lấy toàn bộ dữ liệu bảng categories
-        cursor.execute("SELECT * FROM categories")
-        categories = cursor.fetchall()
+        # ✅ 7. Cập nhật tác giả
+        cursor.execute("DELETE FROM book_authors WHERE book_id = %s", (books_id,))
+        for author_id in author_ids:
+            cursor.execute("""
+                INSERT INTO book_authors (book_id, author_id)
+                VALUES (%s, %s)
+            """, (books_id, author_id))
+        conn.commit()
+
+        # ✅ 8. Lấy lại dữ liệu sau khi cập nhật
+        cursor.execute("""
+            SELECT 
+                b.books_id, b.Title, b.Description, b.ISBN, b.PublishYear, b.Language,
+                b.DocumentType, b.UploadDate, b.UploadedBy, b.IsPublic, b.image,
+                c.category_name, p.publisher_name,
+                GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
+            FROM books b
+            LEFT JOIN categories c ON b.category_id = c.category_id
+            LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
+            LEFT JOIN book_authors ba ON b.books_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
+            WHERE b.books_id = %s
+            GROUP BY b.books_id
+        """, (books_id,))
+        updated_book = cursor.fetchone()
 
         return jsonify({
-            "status": 200,
             "success": True,
-            "authors": authors,
-            "categories": categories
+            "message": "Cập nhật thông tin sách thành công.",
+            "updated_book": updated_book
         }), 200
 
     except Exception as e:
+        conn.rollback()
         return jsonify({
-            "status": 500,
             "success": False,
             "message": f"Lỗi máy chủ: {str(e)}"
         }), 500
@@ -886,6 +873,67 @@ def get_authors_and_categories():
         cursor.close()
         conn.close()
 
+
+
+@app.route("/api/get_authors_and_categories", methods=["POST"])
+def get_authors_and_categories():
+    data = request.get_json()
+    
+    # ✅ Kiểm tra API key
+    if data.get("api_key") != API_KEY:
+        return jsonify({
+            "success": False,
+            "message": "API key không hợp lệ."
+        }), 403
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ Lấy danh sách tác giả
+        cursor.execute("""
+            SELECT 
+                author_id,
+                author_name,
+                biography,
+                birth_year,
+                death_year
+            FROM authors
+            ORDER BY author_name ASC
+        """)
+        authors = cursor.fetchall()
+
+        # ✅ Lấy danh sách thể loại
+        cursor.execute("""
+            SELECT 
+                category_id,
+                category_name,
+                description
+            FROM categories
+            ORDER BY category_name ASC
+        """)
+        categories = cursor.fetchall()
+
+        return jsonify({
+            "success": True,
+            "message": "Lấy dữ liệu thành công.",
+            "data": {
+                "authors": authors,
+                "categories": categories
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Lỗi máy chủ: {str(e)}"
+        }), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.route("/api/get_publishers", methods=["POST"])
 def get_publishers():
     data = request.get_json()
@@ -893,65 +941,34 @@ def get_publishers():
     # ✅ Kiểm tra API key
     if data.get("api_key") != API_KEY:
         return jsonify({
-            "status": 403,
             "success": False,
             "message": "API key không hợp lệ."
-        }), 403
-
-    token = data.get("token")
-    role_id = None
-    email_user = None
-
-    # ✅ Giải mã token
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({
-                "status": 401,
-                "success": False,
-                "message": "Token hết hạn."
-            }), 401
-        except jwt.InvalidTokenError:
-            return jsonify({
-                "status": 401,
-                "success": False,
-                "message": "Token không hợp lệ."
-            }), 401
-    else:
-        return jsonify({
-            "status": 401,
-            "success": False,
-            "message": "Thiếu token xác thực."
-        }), 401
-
-    # ✅ Kiểm tra role hợp lệ
-    if role_id not in [1, 2]:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "Bạn không có quyền truy cập dữ liệu này."
         }), 403
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Lấy toàn bộ dữ liệu từ bảng publishers
-        cursor.execute("SELECT * FROM publishers")
+        cursor.execute("""
+            SELECT 
+                publisher_id,
+                publisher_name,
+                address,
+                phone,
+                email
+            FROM publishers
+            ORDER BY publisher_name ASC
+        """)
         publishers = cursor.fetchall()
 
         return jsonify({
-            "status": 200,
             "success": True,
-            "publishers": publishers
+            "message": "Lấy danh sách nhà xuất bản thành công.",
+            "data": publishers
         }), 200
 
     except Exception as e:
         return jsonify({
-            "status": 500,
             "success": False,
             "message": f"Lỗi máy chủ: {str(e)}"
         }), 500
@@ -1037,129 +1054,6 @@ def get_news():
         conn.close()
 
 
-@app.route("/api/add_book_admin1", methods=["POST"])
-def add_book_admin():
-    data = request.get_json()
-
-    # ✅ Kiểm tra API key
-    if data.get("api_key") != API_KEY:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "API key không hợp lệ."
-        }), 403
-
-    # ✅ Lấy dữ liệu người dùng gửi lên
-    datauser = data.get("datauser")
-    if not datauser:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu dữ liệu datauser."
-        }), 400
-
-    token = data.get("token")
-    role_id = None
-    email_user = None
-
-    # ✅ Giải mã token
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
-    else:
-        return jsonify({
-            "status": 401,
-            "success": False,
-            "message": "Thiếu token xác thực."
-        }), 401
-
-    # ✅ Chỉ role_id = 1 hoặc 2 được phép thêm
-    if role_id not in [1, 2]:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "Bạn không có quyền thêm sách."
-        }), 403
-
-    # ✅ Lấy thông tin sách từ datauser
-    title = datauser.get("Title")
-    description = datauser.get("Description")
-    isbn = datauser.get("ISBN")
-    publish_year = datauser.get("PublishYear")
-    language = datauser.get("Language")
-    document_type = datauser.get("DocumentType")
-    publisher_id = datauser.get("publisher_id")
-    category_id = datauser.get("category_id")
-    author_ids = datauser.get("author_ids")  # Danh sách nhiều tác giả [1,2,3,...]
-    image = datauser.get("image")
-    is_public = datauser.get("IsPublic", 1)
-
-    # ✅ Kiểm tra dữ liệu bắt buộc
-    if not all([title, publish_year, language, document_type, publisher_id, category_id]):
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu thông tin bắt buộc để thêm sách."
-        }), 400
-
-    # ✅ Kiểm tra danh sách tác giả
-    if not author_ids or not isinstance(author_ids, list):
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Danh sách tác giả không hợp lệ (phải là mảng)."
-        }), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        # ✅ Thêm vào bảng books
-        cursor.execute("""
-            INSERT INTO books 
-            (Title, Description, ISBN, PublishYear, Language, DocumentType, publisher_id, category_id, UploadedBy, image, IsPublic)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            title, description, isbn, publish_year, language, document_type,
-            publisher_id, category_id, email_user, image, is_public
-        ))
-        conn.commit()
-
-        # ✅ Lấy id sách vừa thêm
-        book_id = cursor.lastrowid
-
-        # ✅ Thêm nhiều tác giả vào bảng book_authors
-        for author_id in author_ids:
-            cursor.execute("""
-                INSERT INTO book_authors (book_id, author_id)
-                VALUES (%s, %s)
-            """, (book_id, author_id))
-        conn.commit()
-
-        return jsonify({
-            "status": 200,
-            "success": True,
-            "message": "Thêm sách thành công.",
-            "book_id": book_id
-        }), 200
-
-    except Exception as e:
-        conn.rollback()
-        return jsonify({
-            "status": 500,
-            "success": False,
-            "message": f"Lỗi máy chủ: {str(e)}"
-        }), 500
-
-    finally:
-        cursor.close()
-        conn.close()
 
 @app.route("/api/add_authors", methods=["POST"])
 def add_author():
@@ -1857,494 +1751,6 @@ def edit_authors():
         conn.close()
 
 
-@app.route("/api/edit_book_admin", methods=["POST"])
-def edit_book_admin():
-    data = request.get_json()
-
-    # ✅ Kiểm tra API key
-    if data.get("api_key") != API_KEY:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "API key không hợp lệ."
-        }), 403
-
-    # ✅ Giải mã token
-    token = data.get("token")
-    role_id = None
-    email_user = None
-
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"status": 401, "success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"status": 401, "success": False, "message": "Token không hợp lệ."}), 401
-    else:
-        return jsonify({"status": 401, "success": False, "message": "Thiếu token xác thực."}), 401
-
-    # ✅ Chỉ role_id = 1 hoặc 2 được phép chỉnh sửa
-    if role_id not in [1, 2]:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "Bạn không có quyền chỉnh sửa sách."
-        }), 403
-
-    # ✅ Lấy dữ liệu từ client
-    datauser = data.get("datauser")
-    if not datauser:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu dữ liệu datauser."
-        }), 400
-
-    # ✅ Lấy các thông tin cần cập nhật
-    books_id = datauser.get("books_id")
-    title = datauser.get("Title")
-    description = datauser.get("Description")
-    isbn = datauser.get("ISBN")
-    publish_year = datauser.get("PublishYear")
-    language = datauser.get("Language")
-    document_type = datauser.get("DocumentType")
-    publisher_id = datauser.get("publisher_id")
-    category_id = datauser.get("category_id")
-    author_ids = datauser.get("author_ids")  # Mảng [1, 2, 3]
-    image = datauser.get("image")
-    is_public = datauser.get("IsPublic", 1)
-
-    # ✅ Kiểm tra dữ liệu bắt buộc
-    if not books_id or not title:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu books_id hoặc tiêu đề sách."
-        }), 400
-
-    if not author_ids or not isinstance(author_ids, list) or len(author_ids) == 0:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Danh sách tác giả không hợp lệ (phải là mảng và không rỗng)."
-        }), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        # ✅ Kiểm tra sách tồn tại không
-        cursor.execute("SELECT * FROM books WHERE books_id = %s", (books_id,))
-        book = cursor.fetchone()
-        if not book:
-            return jsonify({
-                "status": 404,
-                "success": False,
-                "message": "Không tìm thấy sách với ID này."
-            }), 404
-
-        # ✅ Cập nhật thông tin bảng books
-        cursor.execute("""
-            UPDATE books
-            SET Title = %s,
-                Description = %s,
-                ISBN = %s,
-                PublishYear = %s,
-                Language = %s,
-                DocumentType = %s,
-                publisher_id = %s,
-                category_id = %s,
-                UploadedBy = %s,
-                image = %s,
-                IsPublic = %s
-            WHERE books_id = %s
-        """, (
-            title, description, isbn, publish_year, language, document_type,
-            publisher_id, category_id, email_user, image, is_public, books_id
-        ))
-        conn.commit()
-
-        # ✅ Xóa toàn bộ liên kết tác giả cũ
-        cursor.execute("DELETE FROM book_authors WHERE book_id = %s", (books_id,))
-        conn.commit()
-
-        # ✅ Thêm mới danh sách tác giả
-        for author_id in author_ids:
-            cursor.execute("""
-                INSERT INTO book_authors (book_id, author_id)
-                VALUES (%s, %s)
-            """, (books_id, author_id))
-        conn.commit()
-
-        # ✅ Lấy lại dữ liệu sách sau cập nhật
-        cursor.execute("""
-            SELECT 
-                b.books_id, b.Title, b.Description, b.ISBN, b.PublishYear, b.Language,
-                b.DocumentType, b.UploadDate, b.UploadedBy, b.IsPublic, b.image,
-                c.category_name, p.publisher_name,
-                GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
-            FROM books b
-            LEFT JOIN categories c ON b.category_id = c.category_id
-            LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
-            LEFT JOIN book_authors ba ON b.books_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.books_id = %s
-            GROUP BY b.books_id
-        """, (books_id,))
-        updated_book = cursor.fetchone()
-
-        return jsonify({
-            "status": 200,
-            "success": True,
-            "message": "Cập nhật thông tin sách thành công.",
-            "updated_book": updated_book
-        }), 200
-
-    except Exception as e:
-        conn.rollback()
-        return jsonify({
-            "status": 500,
-            "success": False,
-            "message": f"Lỗi máy chủ: {str(e)}"
-        }), 500
-
-    finally:
-        cursor.close()
-        conn.close()
-
-    data = request.get_json()
-
-    # ✅ Kiểm tra API key
-    if data.get("api_key") != API_KEY:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "API key không hợp lệ."
-        }), 403
-
-    # ✅ Giải mã token
-    token = data.get("token")
-    role_id = None
-    email_user = None
-
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"status": 401, "success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"status": 401, "success": False, "message": "Token không hợp lệ."}), 401
-    else:
-        return jsonify({"status": 401, "success": False, "message": "Thiếu token xác thực."}), 401
-
-    # ✅ Chỉ role_id = 1 hoặc 2 được phép chỉnh sửa
-    if role_id not in [1, 2]:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "Bạn không có quyền chỉnh sửa sách."
-        }), 403
-
-    # ✅ Lấy dữ liệu người dùng gửi lên
-    datauser = data.get("datauser")
-    if not datauser:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu dữ liệu datauser."
-        }), 400
-
-    # ✅ Lấy thông tin cần cập nhật
-    books_id = datauser.get("books_id")
-    title = datauser.get("Title")
-    description = datauser.get("Description")
-    isbn = datauser.get("ISBN")
-    publish_year = datauser.get("PublishYear")
-    language = datauser.get("Language")
-    document_type = datauser.get("DocumentType")
-    publisher_id = datauser.get("publisher_id")
-    category_id = datauser.get("category_id")
-    author_ids = datauser.get("author_ids")  # Danh sách nhiều tác giả [1,2,3,...]
-    image = datauser.get("image")
-    is_public = datauser.get("IsPublic", 1)
-
-    # ✅ Kiểm tra dữ liệu bắt buộc
-    if not books_id or not title:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu books_id hoặc Title để cập nhật."
-        }), 400
-
-    if not author_ids or not isinstance(author_ids, list):
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Danh sách tác giả không hợp lệ (phải là mảng)."
-        }), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        # ✅ Kiểm tra xem sách có tồn tại không
-        cursor.execute("SELECT * FROM books WHERE books_id = %s", (books_id,))
-        book = cursor.fetchone()
-        if not book:
-            return jsonify({
-                "status": 404,
-                "success": False,
-                "message": "Không tìm thấy sách với ID này."
-            }), 404
-
-        # ✅ Cập nhật thông tin sách
-        cursor.execute("""
-            UPDATE books 
-            SET Title = %s,
-                Description = %s,
-                ISBN = %s,
-                PublishYear = %s,
-                Language = %s,
-                DocumentType = %s,
-                publisher_id = %s,
-                category_id = %s,
-                UploadedBy = %s,
-                image = %s,
-                IsPublic = %s
-            WHERE books_id = %s
-        """, (
-            title, description, isbn, publish_year, language, document_type,
-            publisher_id, category_id, email_user, image, is_public, books_id
-        ))
-        conn.commit()
-
-        # ✅ Xóa toàn bộ liên kết tác giả cũ
-        cursor.execute("DELETE FROM book_authors WHERE book_id = %s", (books_id,))
-        conn.commit()
-
-        # ✅ Thêm lại danh sách tác giả mới
-        for author_id in author_ids:
-            cursor.execute("""
-                INSERT INTO book_authors (book_id, author_id)
-                VALUES (%s, %s)
-            """, (books_id, author_id))
-        conn.commit()
-
-        # ✅ Lấy lại dữ liệu sách sau khi cập nhật
-        cursor.execute("""
-            SELECT 
-                b.books_id, b.Title, b.Description, b.ISBN, b.PublishYear, b.Language,
-                b.DocumentType, b.UploadDate, b.UploadedBy, b.IsPublic, b.image,
-                c.category_name, p.publisher_name,
-                GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
-            FROM books b
-            LEFT JOIN categories c ON b.category_id = c.category_id
-            LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
-            LEFT JOIN book_authors ba ON b.books_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.books_id = %s
-            GROUP BY b.books_id
-        """, (books_id,))
-        updated_book = cursor.fetchone()
-
-        return jsonify({
-            "status": 200,
-            "success": True,
-            "message": "Cập nhật thông tin sách thành công.",
-            "updated_book": updated_book
-        }), 200
-
-    except Exception as e:
-        conn.rollback()
-        return jsonify({
-            "status": 500,
-            "success": False,
-            "message": f"Lỗi máy chủ: {str(e)}"
-        }), 500
-
-    finally:
-        cursor.close()
-        conn.close()
-
-    data = request.get_json()
-
-    # ✅ Kiểm tra API key
-    if data.get("api_key") != API_KEY:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "API key không hợp lệ."
-        }), 403
-
-    # ✅ Giải mã token
-    token = data.get("token")
-    role_id = None
-
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"status": 401, "success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"status": 401, "success": False, "message": "Token không hợp lệ."}), 401
-    else:
-        return jsonify({"status": 401, "success": False, "message": "Thiếu token xác thực."}), 401
-
-    # ✅ Chỉ role_id = 1 hoặc 2 được phép chỉnh sửa
-    if role_id not in [1, 2]:
-        return jsonify({
-            "status": 403,
-            "success": False,
-            "message": "Bạn không có quyền chỉnh sửa sách."
-        }), 403
-
-    # ✅ Lấy dữ liệu người dùng gửi lên
-    datauser = data.get("datauser")
-    if not datauser:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu dữ liệu datauser."
-        }), 400
-
-    # ✅ Lấy thông tin cập nhật
-    books_id = datauser.get("books_id")
-    title = datauser.get("Title")
-    description = datauser.get("Description")
-    isbn = datauser.get("ISBN")
-    publish_year = datauser.get("PublishYear")
-    language = datauser.get("Language")
-    document_type = datauser.get("DocumentType")
-    is_public = datauser.get("IsPublic", 1)
-    image = datauser.get("image")
-    uploaded_by = datauser.get("UploadedBy")
-
-    category_name = datauser.get("category_name")
-    publisher_name = datauser.get("publisher_name")
-    author_names = datauser.get("authors")  # Chuỗi: "A, B, C"
-
-    if not books_id or not title:
-        return jsonify({
-            "status": 400,
-            "success": False,
-            "message": "Thiếu books_id hoặc tiêu đề sách."
-        }), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        # ✅ Lấy publisher_id theo tên
-        publisher_id = None
-        if publisher_name:
-            cursor.execute("SELECT publisher_id FROM publishers WHERE publisher_name = %s", (publisher_name,))
-            pub = cursor.fetchone()
-            if pub:
-                publisher_id = pub["publisher_id"]
-            else:
-                cursor.execute("INSERT INTO publishers (publisher_name) VALUES (%s)", (publisher_name,))
-                conn.commit()
-                publisher_id = cursor.lastrowid
-
-        # ✅ Lấy category_id theo tên
-        category_id = None
-        if category_name:
-            cursor.execute("SELECT category_id FROM categories WHERE category_name = %s", (category_name,))
-            cat = cursor.fetchone()
-            if cat:
-                category_id = cat["category_id"]
-            else:
-                cursor.execute("INSERT INTO categories (category_name) VALUES (%s)", (category_name,))
-                conn.commit()
-                category_id = cursor.lastrowid
-
-        # ✅ Cập nhật thông tin bảng books
-        cursor.execute("""
-            UPDATE books
-            SET Title = %s,
-                Description = %s,
-                ISBN = %s,
-                PublishYear = %s,
-                Language = %s,
-                DocumentType = %s,
-                UploadedBy = %s,
-                IsPublic = %s,
-                image = %s,
-                publisher_id = %s,
-                category_id = %s
-            WHERE books_id = %s
-        """, (
-            title, description, isbn, publish_year, language, document_type,
-            uploaded_by, is_public, image, publisher_id, category_id, books_id
-        ))
-        conn.commit()
-
-        # ✅ Xử lý danh sách tác giả
-        if author_names:
-            author_list = [a.strip() for a in author_names.split(",") if a.strip()]
-
-            # Xóa toàn bộ liên kết cũ
-            cursor.execute("DELETE FROM book_authors WHERE book_id = %s", (books_id,))
-            conn.commit()
-
-            # Thêm lại từng tác giả
-            for name in author_list:
-                cursor.execute("SELECT author_id FROM authors WHERE author_name = %s", (name,))
-                author = cursor.fetchone()
-                if author:
-                    author_id = author["author_id"]
-                else:
-                    cursor.execute("INSERT INTO authors (author_name) VALUES (%s)", (name,))
-                    conn.commit()
-                    author_id = cursor.lastrowid
-
-                cursor.execute(
-                    "INSERT INTO book_authors (book_id, author_id) VALUES (%s, %s)",
-                    (books_id, author_id)
-                )
-            conn.commit()
-
-        # ✅ Lấy lại dữ liệu sau khi cập nhật
-        cursor.execute("""
-            SELECT 
-                b.books_id, b.Title, b.Description, b.ISBN, b.PublishYear, b.Language, 
-                b.DocumentType, b.UploadDate, b.UploadedBy, b.IsPublic, b.image,
-                c.category_name, p.publisher_name,
-                GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
-            FROM books b
-            LEFT JOIN categories c ON b.category_id = c.category_id
-            LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
-            LEFT JOIN book_authors ba ON b.books_id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.author_id
-            WHERE b.books_id = %s
-            GROUP BY b.books_id
-        """, (books_id,))
-        updated_book = cursor.fetchone()
-
-        return jsonify({
-            "status": 200,
-            "success": True,
-            "message": "Cập nhật thông tin sách thành công.",
-            "updated_book": updated_book
-        }), 200
-
-    except Exception as e:
-        conn.rollback()
-        return jsonify({
-            "status": 500,
-            "success": False,
-            "message": f"Lỗi máy chủ: {str(e)}"
-        }), 500
-
-    finally:
-        cursor.close()
-        conn.close()
 
 @app.route("/api/add_publishers", methods=["POST"])
 def add_publishers():
@@ -2784,7 +2190,6 @@ def del_categories():
 
     except Exception as e:
         conn.rollback()
-        print("🔥 Lỗi xóa danh mục:", e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -2900,7 +2305,6 @@ def add_categories():
 
     except Exception as e:
         conn.rollback()
-        print("🔥 Lỗi thêm danh mục:", e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -3028,7 +2432,6 @@ def edit_categories():
 
     except Exception as e:
         conn.rollback()
-        print("🔥 Lỗi khi cập nhật danh mục:", e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -3039,9 +2442,6 @@ def edit_categories():
         cursor.close()
         conn.close()
 
-# ===============================
-# 📚 GET BORROW_RETURN
-# ===============================
 @app.route("/api/get_borrow_return", methods=["POST"])
 def get_borrow_return():
     data = request.get_json()
@@ -3136,7 +2536,6 @@ def get_borrow_return():
 
     except Exception as e:
         conn.rollback()
-        print(e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -3147,10 +2546,6 @@ def get_borrow_return():
         conn.close()
 
 
-
-# ===============================
-# 📚 ADD BORROW_RETURN
-# ===============================
 @app.route("/api/add_borrow_return", methods=["POST"])
 def add_borrow_return():
     data = request.get_json()
@@ -3218,16 +2613,12 @@ def add_borrow_return():
 
     except Exception as e:
         conn.rollback()
-        print(e)
         return jsonify({"status": 500, "success": False, "message": f"Lỗi máy chủ: {str(e)}"}), 500
     finally:
         cursor.close()
         conn.close()
 
 
-# ===============================
-# 📚 EDIT BORROW_RETURN
-# ===============================
 @app.route("/api/edit_borrow_return", methods=["POST"])
 def edit_borrow_return():
     data = request.get_json()
@@ -3308,7 +2699,6 @@ def edit_borrow_return():
 
     except Exception as e:
         conn.rollback()
-        print(e)
         return jsonify({"status": 500, "success": False, "message": f"Lỗi máy chủ: {str(e)}"}), 500
     finally:
         cursor.close()
