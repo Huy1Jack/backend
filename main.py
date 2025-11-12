@@ -355,7 +355,7 @@ def set_newpass():
 def show_books():
     data = request.get_json()
 
-    #   Kiểm tra API key
+    # ✅ Kiểm tra API key
     if data.get("api_key") != API_KEY:
         return jsonify({
             "status": 403,
@@ -366,13 +366,13 @@ def show_books():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    #   Lấy dữ liệu từ bảng books (có join tác giả, thể loại, NXB)
+    # ✅ Lấy danh sách sách (bỏ b.rate)
     cursor.execute("""
         SELECT 
             b.books_id,
             b.Title,
             b.Description,
-            a.author_name AS Author,
+            GROUP_CONCAT(DISTINCT a.author_name SEPARATOR ', ') AS Author,
             c.category_name AS Category,
             b.ISBN,
             b.PublishYear,
@@ -381,22 +381,21 @@ def show_books():
             b.DocumentType,
             b.UploadDate,
             b.UploadedBy,
-            b.image,
-            b.rate
+            b.image
         FROM books b
-        LEFT JOIN authors a ON b.author_id = a.author_id
+        LEFT JOIN book_authors ba ON b.books_id = ba.book_id
+        LEFT JOIN authors a ON ba.author_id = a.author_id
         LEFT JOIN categories c ON b.category_id = c.category_id
         LEFT JOIN publishers p ON b.publisher_id = p.publisher_id
         WHERE b.IsPublic = 1
+        GROUP BY b.books_id
         ORDER BY b.UploadDate DESC
     """)
 
     books = cursor.fetchall()
-
     cursor.close()
     conn.close()
 
-    #   Trường hợp không có sách
     if not books:
         return jsonify({
             "status": 404,
@@ -404,7 +403,6 @@ def show_books():
             "message": "Không có sách nào trong hệ thống."
         }), 404
 
-    #   Thành công
     return jsonify({
         "status": 200,
         "success": True,
@@ -412,6 +410,8 @@ def show_books():
         "total": len(books),
         "data": books
     }), 200
+
+
 
 @app.route("/api/add_book_review", methods=["POST"])
 def add_book_review():
@@ -460,7 +460,7 @@ def add_book_review():
         #   Thêm dữ liệu (user_id và rating có thể NULL)
         cursor.execute("""
             INSERT INTO bookreview (user_id, books_id, rating, comment, review_date, isActive)
-            VALUES (%s, %s, %s, %s, NOW(), 0)
+            VALUES (%s, %s, %s, %s, NOW(), 1)
         """, (user_id, books_id, rating, comment))
 
         conn.commit()
@@ -473,6 +473,7 @@ def add_book_review():
 
     except Exception as e:
         conn.rollback()
+        print(e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -484,12 +485,87 @@ def add_book_review():
         conn.close()
 
 
+@app.route("/api/show_book_search", methods=["POST"])
+def show_book_search():
+    """
+    API tìm kiếm sách theo tiêu đề hoặc tác giả.
+    Hỗ trợ cấu trúc bảng có mối quan hệ N-N giữa books và authors.
+    """
+    data = request.get_json(silent=True) or {}
+    keyword = data.get("keyword", "").strip()
+
+    if not keyword:
+        return jsonify({
+            "success": False,
+            "message": "Không có từ khóa tìm kiếm."
+        }), 400
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        # ✅ Chỉ tìm theo tiêu đề hoặc tác giả, không theo thể loại
+        sql = """
+            SELECT 
+                b.books_id AS BookID,
+                b.Title,
+                b.DocumentType,
+                b.image AS CoverImage,
+                GROUP_CONCAT(DISTINCT a.author_name SEPARATOR ', ') AS Author,
+                c.category_name AS Category
+            FROM books b
+            LEFT JOIN book_authors ba ON b.books_id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.author_id
+            LEFT JOIN categories c ON b.category_id = c.category_id
+            WHERE 
+                b.Title LIKE %s
+                OR a.author_name LIKE %s
+            GROUP BY b.books_id, b.Title, b.DocumentType, b.image, c.category_name
+            ORDER BY b.Title ASC
+            LIMIT 50
+        """
+
+        search_value = f"%{keyword}%"
+        cursor.execute(sql, (search_value, search_value))
+        results = cursor.fetchall()
+
+        books = [
+            {
+                "books_id": b.get("BookID"),
+                "Title": b.get("Title"),
+                "Author": b.get("Author") or "Không rõ tác giả",
+                "Category": b.get("Category") or "Không rõ thể loại",
+                "DocumentType": b.get("DocumentType") or "",
+                "image": b.get("CoverImage") or "/logo/logo.svg",
+            }
+            for b in results
+        ]
+
+        return jsonify({
+            "success": True,
+            "count": len(books),
+            "books": books
+        })
+
+    except Exception as e:
+        print("❌ Lỗi khi tìm kiếm sách:", e)
+        return jsonify({
+            "success": False,
+            "message": f"Lỗi server: {str(e)}"
+        }), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 
 @app.route("/api/show_book_reviews", methods=["POST"])
 def show_book_reviews():
     data = request.get_json()
 
-    #   Kiểm tra API key
     if data.get("api_key") != API_KEY:
         return jsonify({
             "status": 403,
@@ -500,7 +576,6 @@ def show_book_reviews():
     datauser = data.get("datauser")
     books_id = datauser.get("booksId") if datauser else None
 
-    #   Kiểm tra đầu vào
     if not books_id:
         return jsonify({
             "status": 400,
@@ -512,7 +587,7 @@ def show_book_reviews():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        #   Lấy dữ liệu đánh giá từ bảng bookreview
+        # Lấy danh sách đánh giá
         cursor.execute("""
             SELECT 
                 br.review_id,
@@ -528,14 +603,41 @@ def show_book_reviews():
             WHERE br.books_id = %s AND br.isActive = 1
             ORDER BY br.review_date DESC
         """, (books_id,))
-
         reviews = cursor.fetchall()
+
+        # ✅ Trung bình và tổng số đánh giá
+        cursor.execute("""
+            SELECT ROUND(AVG(rating), 1) AS avg_rating, COUNT(*) AS total_reviews
+            FROM bookreview
+            WHERE books_id = %s AND isActive = 1
+        """, (books_id,))
+        avg_data = cursor.fetchone()
+
+        avg_rating = avg_data["avg_rating"] or 0
+        total_reviews = avg_data["total_reviews"] or 0
+
+        # ✅ Thống kê tỷ lệ sao
+        cursor.execute("""
+            SELECT rating, COUNT(*) AS count
+            FROM bookreview
+            WHERE books_id = %s AND isActive = 1
+            GROUP BY rating
+        """, (books_id,))
+        distribution_rows = cursor.fetchall()
+
+        # Tạo dict 5→1 sao
+        rating_distribution = {str(i): 0 for i in range(1, 6)}
+        for row in distribution_rows:
+            rating_distribution[str(int(row["rating"]))] = row["count"]
 
         return jsonify({
             "status": 200,
             "success": True,
             "message": "Lấy danh sách đánh giá thành công!",
-            "data": reviews
+            "data": reviews,
+            "avg_rating": avg_rating,
+            "total_reviews": total_reviews,
+            "rating_distribution": rating_distribution
         }), 200
 
     except Exception as e:
