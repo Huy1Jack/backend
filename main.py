@@ -473,7 +473,6 @@ def add_book_review():
 
     except Exception as e:
         conn.rollback()
-        print(e)
         return jsonify({
             "status": 500,
             "success": False,
@@ -548,7 +547,7 @@ def show_book_search():
         })
 
     except Exception as e:
-        print("❌ Lỗi khi tìm kiếm sách:", e)
+
         return jsonify({
             "success": False,
             "message": f"Lỗi server: {str(e)}"
@@ -2556,63 +2555,69 @@ def get_borrow_return():
             "message": "API key không hợp lệ."
         }), 403
 
+    # ✅ Giải mã token
     token = data.get("token")
-    role_id = None
-    email_user = None
-
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
-    else:
+    if not token:
         return jsonify({
             "status": 401,
             "success": False,
             "message": "Thiếu token xác thực."
         }), 401
 
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        email_user = decoded.get("email")
+    except jwt.ExpiredSignatureError:
+        return jsonify({"success": False, "message": "Token hết hạn."}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Bước 1: Cập nhật trạng thái 'Quá hạn' tự động
+        # ✅ Tự động cập nhật trạng thái "Quá hạn"
         cursor.execute("""
             UPDATE borrow_return
             SET status = 'Quá hạn'
             WHERE status = 'Đang mượn'
-              AND return_date IS NOT NULL
-              AND return_date < CURDATE()
+              AND due_date < CURDATE()
+              AND return_date IS NULL
         """)
         conn.commit()
 
-        # ✅ Bước 2: Truy vấn danh sách sau khi cập nhật
+        # ✅ Admin (1) & Thủ thư (2): xem toàn bộ
         if role_id in [1, 2]:
             cursor.execute("""
-                SELECT br.borrow_id,
-                       u.name AS user_name,
-                       b.Title AS book_title,
-                       br.borrow_date,
-                       br.return_date,
-                       br.status,
-                       br.last_updated_by
+                SELECT 
+                    br.borrow_id,
+                    br.user_id,
+                    u.name AS user_name,
+                    b.Title AS book_title,
+                    br.borrow_date,
+                    br.due_date,
+                    br.return_date,
+                    br.status,
+                    br.notes,
+                    br.last_updated_by
                 FROM borrow_return br
                 JOIN users u ON br.user_id = u.id
                 JOIN books b ON br.books_id = b.books_id
                 ORDER BY br.borrow_date DESC
             """)
         else:
+            # ✅ Người dùng thường chỉ xem mượn của chính họ
             cursor.execute("""
-                SELECT br.borrow_id,
-                       b.Title AS book_title,
-                       br.borrow_date,
-                       br.return_date,
-                       br.status,
-                       br.last_updated_by
+                SELECT 
+                    br.borrow_id,
+                    b.Title AS book_title,
+                    br.borrow_date,
+                    br.due_date,
+                    br.return_date,
+                    br.status,
+                    br.notes,
+                    br.last_updated_by
                 FROM borrow_return br
                 JOIN users u ON br.user_id = u.id
                 JOIN books b ON br.books_id = b.books_id
@@ -2648,93 +2653,111 @@ def get_borrow_return():
         conn.close()
 
 
-@app.route("/api/add_borrow_return", methods=["POST"])
-def add_borrow_return():
-    data = request.get_json()
-    if data.get("api_key") != API_KEY:
-        return jsonify({"status": 403, "success": False, "message": "API key không hợp lệ."}), 403
 
-    datauser = data.get("datauser")
-    if not datauser:
-        return jsonify({"status": 400, "success": False, "message": "Thiếu dữ liệu datauser."}), 400
 
-    token = data.get("token")
-    if not token:
-        return jsonify({"status": 401, "success": False, "message": "Thiếu token xác thực."}), 401
 
-    try:
-        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        role_id = decoded.get("role")
-        email_user = decoded.get("email")
-        name_user = decoded.get("name") or email_user
-    except jwt.ExpiredSignatureError:
-        return jsonify({"success": False, "message": "Token hết hạn."}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
+# @app.route("/api/add_borrow_return", methods=["POST"])
+# def add_borrow_return():
+#     data = request.get_json()
+#     if data.get("api_key") != API_KEY:
+#         return jsonify({"status": 403, "success": False, "message": "API key không hợp lệ."}), 403
 
-    if role_id not in [1, 2]:
-        return jsonify({"status": 403, "success": False, "message": "Bạn không có quyền thêm bản ghi mượn sách."}), 403
+#     datauser = data.get("datauser")
+#     if not datauser:
+#         return jsonify({"status": 400, "success": False, "message": "Thiếu dữ liệu datauser."}), 400
 
-    user_name = datauser.get("user_name")
-    book_title = datauser.get("book_title")
-    borrow_date = datauser.get("borrow_date")
-    return_date = datauser.get("return_date")
-    status = datauser.get("status", "Đang mượn")
+#     token = data.get("token")
+#     if not token:
+#         return jsonify({"status": 401, "success": False, "message": "Thiếu token xác thực."}), 401
 
-    if not user_name or not book_title or not borrow_date:
-        return jsonify({"status": 400, "success": False, "message": "Thiếu thông tin bắt buộc."}), 400
+#     try:
+#         decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+#         role_id = decoded.get("role")
+#         email_user = decoded.get("email")
+#         name_user = decoded.get("name") or email_user
+#     except jwt.ExpiredSignatureError:
+#         return jsonify({"success": False, "message": "Token hết hạn."}), 401
+#     except jwt.InvalidTokenError:
+#         return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+#     if role_id not in [1, 2]:
+#         return jsonify({"status": 403, "success": False, "message": "Bạn không có quyền thêm bản ghi mượn sách."}), 403
 
-    try:
-        # ✅ Tìm user_id và books_id
-        cursor.execute("SELECT id FROM users WHERE name = %s LIMIT 1", (user_name,))
-        user = cursor.fetchone()
-        cursor.execute("SELECT books_id FROM books WHERE Title = %s LIMIT 1", (book_title,))
-        book = cursor.fetchone()
+#     user_name = datauser.get("user_name")
+#     book_title = datauser.get("book_title")
+#     borrow_date = datauser.get("borrow_date")
+#     return_date = datauser.get("return_date")
+#     status = datauser.get("status", "Đang mượn")
 
-        if not user or not book:
-            return jsonify({"status": 404, "success": False, "message": "Không tìm thấy người dùng hoặc sách."}), 404
+#     if not user_name or not book_title or not borrow_date:
+#         return jsonify({"status": 400, "success": False, "message": "Thiếu thông tin bắt buộc."}), 400
 
-        user_id = user["id"]
-        books_id = book["books_id"]
+#     conn = get_db_connection()
+#     cursor = conn.cursor(dictionary=True)
 
-        # ✅ Thêm dữ liệu + tên người cập nhật
-        cursor.execute("""
-            INSERT INTO borrow_return (user_id, books_id, borrow_date, return_date, status, last_updated_by)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (user_id, books_id, borrow_date, return_date, status, name_user))
-        conn.commit()
+#     try:
+#         # ✅ Tìm user_id và books_id
+#         cursor.execute("SELECT id FROM users WHERE name = %s LIMIT 1", (user_name,))
+#         user = cursor.fetchone()
+#         cursor.execute("SELECT books_id FROM books WHERE Title = %s LIMIT 1", (book_title,))
+#         book = cursor.fetchone()
 
-        return jsonify({
-            "status": 200,
-            "success": True,
-            "message": "Thêm bản ghi mượn sách thành công."
-        }), 200
+#         if not user or not book:
+#             return jsonify({"status": 404, "success": False, "message": "Không tìm thấy người dùng hoặc sách."}), 404
 
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"status": 500, "success": False, "message": f"Lỗi máy chủ: {str(e)}"}), 500
-    finally:
-        cursor.close()
-        conn.close()
+#         user_id = user["id"]
+#         books_id = book["books_id"]
+
+#         # ✅ Thêm dữ liệu + tên người cập nhật
+#         cursor.execute("""
+#             INSERT INTO borrow_return (user_id, books_id, borrow_date, return_date, status, last_updated_by)
+#             VALUES (%s, %s, %s, %s, %s, %s)
+#         """, (user_id, books_id, borrow_date, return_date, status, name_user))
+#         conn.commit()
+
+#         return jsonify({
+#             "status": 200,
+#             "success": True,
+#             "message": "Thêm bản ghi mượn sách thành công."
+#         }), 200
+
+#     except Exception as e:
+#         conn.rollback()
+#         return jsonify({"status": 500, "success": False, "message": f"Lỗi máy chủ: {str(e)}"}), 500
+#     finally:
+#         cursor.close()
+#         conn.close()
 
 
 @app.route("/api/edit_borrow_return", methods=["POST"])
 def edit_borrow_return():
     data = request.get_json()
+
+    # ✅ Kiểm tra API key
     if data.get("api_key") != API_KEY:
-        return jsonify({"status": 403, "success": False, "message": "API key không hợp lệ."}), 403
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "API key không hợp lệ."
+        }), 403
 
     datauser = data.get("datauser")
     if not datauser:
-        return jsonify({"status": 400, "success": False, "message": "Thiếu dữ liệu datauser."}), 400
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "Thiếu dữ liệu datauser."
+        }), 400
 
     token = data.get("token")
     if not token:
-        return jsonify({"status": 401, "success": False, "message": "Thiếu token xác thực."}), 401
+        return jsonify({
+            "status": 401,
+            "success": False,
+            "message": "Thiếu token xác thực."
+        }), 401
 
+    # ✅ Giải mã token
     try:
         decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         role_id = decoded.get("role")
@@ -2745,52 +2768,80 @@ def edit_borrow_return():
     except jwt.InvalidTokenError:
         return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
 
+    # ✅ Chỉ Admin hoặc Thủ thư được phép chỉnh sửa
     if role_id not in [1, 2]:
-        return jsonify({"status": 403, "success": False, "message": "Bạn không có quyền sửa thông tin mượn sách."}), 403
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "Bạn không có quyền sửa thông tin mượn sách."
+        }), 403
 
+    # ✅ Lấy dữ liệu cần thiết
     borrow_id = datauser.get("borrow_id")
     user_name = datauser.get("user_name")
     book_title = datauser.get("book_title")
     borrow_date = datauser.get("borrow_date")
+    due_date = datauser.get("due_date")
     return_date = datauser.get("return_date")
     status = datauser.get("status")
 
+    # ✅ Validate đầu vào
     if not borrow_id:
-        return jsonify({"status": 400, "success": False, "message": "Thiếu borrow_id."}), 400
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "Thiếu borrow_id."
+        }), 400
+
+    # ⚙️ Convert dữ liệu ngày trả nếu rỗng
+    if not return_date or return_date == "":
+        return_date = None
+    if not due_date or due_date == "":
+        due_date = None
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Kiểm tra record tồn tại
+        # ✅ Kiểm tra bản ghi tồn tại
         cursor.execute("SELECT * FROM borrow_return WHERE borrow_id = %s", (borrow_id,))
         record = cursor.fetchone()
         if not record:
-            return jsonify({"status": 404, "success": False, "message": "Không tìm thấy bản ghi mượn này."}), 404
+            return jsonify({
+                "status": 404,
+                "success": False,
+                "message": "Không tìm thấy bản ghi mượn này."
+            }), 404
 
-        # ✅ Tìm user_id và books_id
+        # ✅ Tìm user_id và book_id theo tên (phòng trường hợp người sửa chọn từ dropdown)
         cursor.execute("SELECT id FROM users WHERE name = %s LIMIT 1", (user_name,))
         user = cursor.fetchone()
+
         cursor.execute("SELECT books_id FROM books WHERE Title = %s LIMIT 1", (book_title,))
         book = cursor.fetchone()
 
         if not user or not book:
-            return jsonify({"status": 404, "success": False, "message": "Không tìm thấy người dùng hoặc sách."}), 404
+            return jsonify({
+                "status": 404,
+                "success": False,
+                "message": "Không tìm thấy người dùng hoặc sách tương ứng."
+            }), 404
 
         user_id = user["id"]
         books_id = book["books_id"]
 
-        # ✅ Cập nhật bản ghi
+        # ✅ Cập nhật bản ghi mượn
         cursor.execute("""
             UPDATE borrow_return
             SET user_id = %s,
                 books_id = %s,
                 borrow_date = %s,
+                due_date = %s,
                 return_date = %s,
                 status = %s,
                 last_updated_by = %s
             WHERE borrow_id = %s
-        """, (user_id, books_id, borrow_date, return_date, status, name_user, borrow_id))
+        """, (user_id, books_id, borrow_date, due_date, return_date, status, name_user, borrow_id))
         conn.commit()
 
         return jsonify({
@@ -2799,12 +2850,337 @@ def edit_borrow_return():
             "message": "Cập nhật thông tin mượn sách thành công."
         }), 200
 
+    except mysql.connector.IntegrityError as e:
+        conn.rollback()
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": f"Lỗi ràng buộc dữ liệu: {str(e)}"
+        }), 400
     except Exception as e:
         conn.rollback()
-        return jsonify({"status": 500, "success": False, "message": f"Lỗi máy chủ: {str(e)}"}), 500
+        print(e)
+        return jsonify({
+            "status": 500,
+            "success": False,
+            "message": f"Lỗi máy chủ: {str(e)}"
+        }), 500
     finally:
         cursor.close()
         conn.close()
+@app.route("/api/add_borrow_return", methods=["POST"])
+def add_borrow_return():
+    data = request.get_json()
+
+    if data.get("api_key") != API_KEY:
+        return jsonify({"status": 403, "message": "API key không hợp lệ."}), 403
+
+    token = data.get("token")
+    if not token:
+        return jsonify({"status": 401, "message": "Thiếu token xác thực."}), 401
+
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        email_user = decoded.get("email")
+        role_id = decoded.get("role")
+        name_user = decoded.get("name") or email_user
+    except Exception as e:
+        return jsonify({"status": 401, "message": f"Lỗi token: {str(e)}"}), 401
+
+    borrow_data = data.get("borrow_data", {})
+    books_id = borrow_data.get("books_id")
+    borrow_date = borrow_data.get("borrow_date")
+    due_date = borrow_data.get("due_date")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ Lấy user_id từ email
+        cursor.execute("SELECT id FROM users WHERE email = %s", (email_user,))
+        user = cursor.fetchone()
+        if not user:
+            return jsonify({"status": 404, "message": "Không tìm thấy người dùng."}), 404
+        user_id = user["id"]
+
+        # ✅ Kiểm tra sách tồn tại
+        cursor.execute("SELECT * FROM books WHERE books_id = %s", (books_id,))
+        book = cursor.fetchone()
+        if not book:
+            return jsonify({"status": 404, "message": "Không tìm thấy sách."}), 404
+
+        # ✅ Thêm bản ghi mượn
+        cursor.execute("""
+            INSERT INTO borrow_return (user_id, books_id, borrow_date, due_date, status)
+            VALUES (%s, %s, %s, %s, 'Đang mượn')
+        """, (user_id, books_id, borrow_date, due_date))
+        
+        # ✅ Cập nhật thống kê sách
+        cursor.execute("""
+            UPDATE books 
+            SET borrow_count = borrow_count + 1,
+                available_copies = GREATEST(available_copies - 1, 0)
+            WHERE books_id = %s
+        """, (books_id,))
+        conn.commit()
+
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Đã ghi nhận lượt mượn và cập nhật thống kê sách."
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"status": 500, "message": f"Lỗi máy chủ: {str(e)}"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/return_book", methods=["POST"])
+def return_book():
+    data = request.get_json()
+
+    if data.get("api_key") != API_KEY:
+        return jsonify({"status": 403, "message": "API key không hợp lệ."}), 403
+
+    borrow_id = data.get("borrow_id")
+    return_date = data.get("return_date")
+
+    if not borrow_id or not return_date:
+        return jsonify({"status": 400, "message": "Thiếu thông tin borrow_id hoặc return_date."}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ Lấy bản ghi mượn
+        cursor.execute("SELECT * FROM borrow_return WHERE borrow_id = %s", (borrow_id,))
+        br = cursor.fetchone()
+        if not br:
+            return jsonify({"status": 404, "message": "Không tìm thấy bản ghi mượn."}), 404
+
+        due_date = br["due_date"]
+        books_id = br["books_id"]
+
+        # ✅ Tính tiền phạt nếu trễ (2000 VNĐ/ngày trễ)
+        fine_amount = 0
+        if due_date and return_date > str(due_date):
+            cursor.execute("SELECT DATEDIFF(%s, %s) AS days_late", (return_date, due_date))
+            days_late = cursor.fetchone()["days_late"]
+            fine_amount = max(days_late * 2000, 0)
+
+        # ✅ Cập nhật trạng thái, ngày trả, tiền phạt
+        cursor.execute("""
+            UPDATE borrow_return
+            SET return_date = %s,
+                status = 'Đã trả',
+                fine_amount = %s
+            WHERE borrow_id = %s
+        """, (return_date, fine_amount, borrow_id))
+
+        # ✅ Tăng lại số sách có sẵn
+        cursor.execute("""
+            UPDATE books
+            SET available_copies = available_copies + 1
+            WHERE books_id = %s
+        """, (books_id,))
+
+        conn.commit()
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Cập nhật trả sách thành công.",
+            "fine_amount": fine_amount
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"status": 500, "message": f"Lỗi máy chủ: {str(e)}"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route("/api/book_view", methods=["POST"])
+def book_view():
+    data = request.get_json()
+    books_id = data.get("books_id")
+
+    if data.get("api_key") != API_KEY:
+        return jsonify({"status": 403, "message": "API key không hợp lệ."}), 403
+
+    if not books_id:
+        return jsonify({"status": 400, "message": "Thiếu books_id."}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ Tăng view_count mỗi lần xem
+        cursor.execute("""
+            UPDATE books
+            SET view_count = view_count + 1
+            WHERE books_id = %s
+        """, (books_id,))
+        conn.commit()
+
+        cursor.execute("SELECT books_id, Title, view_count FROM books WHERE books_id = %s", (books_id,))
+        book = cursor.fetchone()
+
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Cập nhật lượt xem thành công.",
+            "data": book
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"status": 500, "message": f"Lỗi máy chủ: {str(e)}"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.route("/api/get_statistics", methods=["POST"])
+def get_statistics():
+    data = request.get_json()
+
+    # ✅ Kiểm tra API key
+    if data.get("api_key") != API_KEY:
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "API key không hợp lệ."
+        }), 403
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # 1️⃣ Top 10 sách được mượn nhiều nhất
+        cursor.execute("""
+            SELECT 
+                b.books_id, 
+                b.Title AS book_title, 
+                b.image,
+                b.borrow_count 
+            FROM books b
+            ORDER BY b.borrow_count DESC 
+            LIMIT 10
+        """)
+        top_books = cursor.fetchall()
+
+        # 2️⃣ Top bạn đọc tích cực
+        cursor.execute("""
+            SELECT 
+                u.id AS user_id,
+                u.name AS user_name,
+                u.email,
+                u.borrow_count
+            FROM users u
+            ORDER BY u.borrow_count DESC
+            LIMIT 10
+        """)
+        top_readers = cursor.fetchall()
+
+        # 3️⃣ Biểu đồ mượn theo tháng (book_statistics)
+        cursor.execute("""
+            SELECT 
+                DATE_FORMAT(stat_date, '%Y-%m') AS month,
+                SUM(borrow_count) AS total_borrow,
+                SUM(return_count) AS total_return
+            FROM book_statistics
+            GROUP BY month
+            ORDER BY month ASC
+        """)
+        monthly_borrow = cursor.fetchall()
+
+        # 4️⃣ Sách được đánh giá cao nhất
+        cursor.execute("""
+            SELECT 
+                b.books_id,
+                b.Title AS book_title,
+                b.image,
+                ROUND(AVG(r.rating), 2) AS avg_rating,
+                COUNT(r.review_id) AS total_reviews
+            FROM bookreview r
+            JOIN books b ON r.books_id = b.books_id
+            WHERE r.isActive = 1 AND r.is_approved = 1
+            GROUP BY b.books_id
+            HAVING total_reviews >= 1
+            ORDER BY avg_rating DESC, total_reviews DESC
+            LIMIT 10
+        """)
+        top_rated_books = cursor.fetchall()
+
+        # 5️⃣ Tỷ lệ thể loại được mượn nhiều nhất
+        cursor.execute("""
+            SELECT 
+                c.category_name,
+                COUNT(br.books_id) AS total_borrowed,
+                ROUND(
+                    (COUNT(br.books_id) / (SELECT COUNT(*) FROM borrow_return)) * 100,
+                    2
+                ) AS percent_borrowed
+            FROM borrow_return br
+            JOIN books b ON br.books_id = b.books_id
+            JOIN categories c ON b.category_id = c.category_id
+            GROUP BY c.category_name
+            ORDER BY total_borrowed DESC
+        """)
+        category_ratio = cursor.fetchall()
+
+        # 6️⃣ Tổng số sách
+        cursor.execute("SELECT COUNT(*) AS total_books FROM books WHERE IsPublic = 1")
+        total_books_result = cursor.fetchone()
+        total_books = total_books_result["total_books"] if total_books_result else 0
+
+        # 7️⃣ Tổng số tài khoản
+        cursor.execute("SELECT COUNT(*) AS total_users FROM users")
+        total_users_result = cursor.fetchone()
+        total_users = total_users_result["total_users"] if total_users_result else 0
+
+        # 8️⃣ Số người đang mượn sách
+        cursor.execute("""
+            SELECT COUNT(DISTINCT user_id) AS active_borrowers 
+            FROM borrow_return 
+            WHERE status = 'Đang mượn' AND return_date IS NULL
+        """)
+        active_borrowers_result = cursor.fetchone()
+        active_borrowers = active_borrowers_result["active_borrowers"] if active_borrowers_result else 0
+
+        # ✅ Tổng hợp kết quả
+        result = {
+            "top_books": top_books,
+            "top_readers": top_readers,
+            "monthly_borrow": monthly_borrow,
+            "top_rated_books": top_rated_books,
+            "category_ratio": category_ratio,
+            "total_books": total_books,
+            "total_users": total_users,
+            "active_borrowers": active_borrowers
+        }
+
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Lấy báo cáo thống kê thành công.",
+            "data": result
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({
+            "status": 500,
+            "success": False,
+            "message": f"Lỗi máy chủ: {str(e)}"
+        }), 500
+    finally:
+        cursor.close()
+        conn.close()
+
 
 
 
