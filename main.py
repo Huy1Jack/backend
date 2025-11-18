@@ -381,7 +381,11 @@ def show_books():
             b.DocumentType,
             b.UploadDate,
             b.UploadedBy,
-            b.image
+            b.image,
+            b.file,
+            b.view_count,
+            b.total_copies,
+            b.status     
         FROM books b
         LEFT JOIN book_authors ba ON b.books_id = ba.book_id
         LEFT JOIN authors a ON ba.author_id = a.author_id
@@ -395,7 +399,6 @@ def show_books():
     books = cursor.fetchall()
     cursor.close()
     conn.close()
-
     if not books:
         return jsonify({
             "status": 404,
@@ -719,6 +722,71 @@ def get_book_admin():
 @app.route("/api/del_book_admin", methods=["POST"])
 def del_book_admin():
     data = request.get_json()
+
+    # ===== 1. Kiểm tra API key =====
+    if data.get("api_key") != API_KEY:
+        return jsonify({"success": False, "message": "API key không hợp lệ."}), 403
+
+    # ===== 2. Giải mã token =====
+    token = data.get("token")
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        email_user = decoded.get("email")
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Token lỗi: {e}"}), 401
+
+    # ===== 3. Lấy books_id từ client =====
+    datauser = data.get("datauser", {})
+    books_id = datauser.get("books_id")
+
+    if not books_id:
+        return jsonify({"success": False, "message": "Thiếu books_id"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ===== 4. Kiểm tra sách có tồn tại không =====
+        cursor.execute("SELECT * FROM books WHERE books_id=%s", (books_id,))
+        book = cursor.fetchone()
+
+        if not book:
+            return jsonify({"success": False, "message": "Sách không tồn tại."}), 404
+
+        # ===== 5. Role Admin (1) → Xóa thoải mái =====
+        if role_id == 1:
+            cursor.execute("DELETE FROM books WHERE books_id=%s", (books_id,))
+
+        # ===== 6. Role Nhân viên (2) → Chỉ xóa sách do mình upload =====
+        elif role_id == 2:
+            cursor.execute(
+                "DELETE FROM books WHERE books_id=%s AND UploadedBy=%s",
+                (books_id, email_user)
+            )
+
+            if cursor.rowcount == 0:
+                return jsonify({
+                    "success": False,
+                    "message": "Bạn không có quyền xóa sách này."
+                }), 403
+
+        else:
+            return jsonify({"success": False, "message": "Không có quyền xóa."}), 403
+
+        conn.commit()
+
+        return jsonify({"success": True, "message": "Xóa sách thành công."}), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+
+    data = request.get_json()
     if data.get("api_key") != API_KEY:
         return jsonify({"success": False, "message": "API key không hợp lệ."}), 403
 
@@ -756,12 +824,11 @@ def del_book_admin():
         cursor.close()
         conn.close()
 
-
-@app.route("/api/add_book_admin1", methods=["POST"])
+@app.route("/api/add_book_adm", methods=["POST"])
 def add_book_admin():
     data = request.get_json()
 
-    # ✅ Kiểm tra API key
+    # ===== 1. Kiểm tra API key =====
     if data.get("api_key") != API_KEY:
         return jsonify({
             "status": 403,
@@ -769,7 +836,7 @@ def add_book_admin():
             "message": "API key không hợp lệ"
         }), 403
 
-    # ✅ Lấy dữ liệu người dùng gửi lên
+    # ===== 2. Lấy dữ liệu datauser =====
     datauser = data.get("datauser")
     if not datauser:
         return jsonify({
@@ -779,25 +846,19 @@ def add_book_admin():
         }), 400
 
     token = data.get("token")
-    role_id = None
     email_user = None
+    role_id = None
 
-    # ✅ Giải mã token
+    # ===== 3. Giải mã token =====
     if token:
         try:
             decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
             role_id = decoded.get("role")
             email_user = decoded.get("email")
         except jwt.ExpiredSignatureError:
-            return jsonify({
-                "success": False,
-                "message": "Token hết hạn."
-            }), 401
+            return jsonify({"success": False, "message": "Token hết hạn."}), 401
         except jwt.InvalidTokenError:
-            return jsonify({
-                "success": False,
-                "message": "Token không hợp lệ."
-            }), 401
+            return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
     else:
         return jsonify({
             "status": 401,
@@ -805,7 +866,7 @@ def add_book_admin():
             "message": "Thiếu token xác thực."
         }), 401
 
-    # ✅ Chỉ role_id = 1 và 2 được phép thêm
+    # ===== 4. Chỉ role 1 và 2 được phép thêm sách =====
     if role_id not in [1, 2]:
         return jsonify({
             "status": 403,
@@ -813,37 +874,68 @@ def add_book_admin():
             "message": "Bạn không có quyền thêm sách."
         }), 403
 
-    # ✅ Lấy thông tin sách từ datauser
+    # ===== 5. Lấy thông tin sách từ body =====
     title = datauser.get("Title")
+    description = datauser.get("Description")
+    isbn = datauser.get("ISBN")
     publish_year = datauser.get("PublishYear")
     language = datauser.get("Language")
     document_type = datauser.get("DocumentType")
-    author_id = datauser.get("author_id")
+    publisher_id = datauser.get("publisher_id")
     category_id = datauser.get("category_id")
+    author_ids = datauser.get("author_ids")  # LIST
+    imgpath = datauser.get("image")
+    docum = datauser.get("file")
+    is_public = datauser.get("IsPublic", 1)
 
-    # ✅ Kiểm tra dữ liệu bắt buộc
-    if not all([title, publish_year, language, document_type, author_id, category_id]):
+    # ===== 6. Kiểm tra dữ liệu bắt buộc =====
+    if not all([title, publish_year, language, document_type, publisher_id, category_id, imgpath, docum]):
         return jsonify({
             "status": 400,
             "success": False,
             "message": "Thiếu thông tin bắt buộc để thêm sách."
         }), 400
 
+    if not author_ids or not isinstance(author_ids, list):
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "author_ids phải là danh sách chứa ít nhất 1 tác giả."
+        }), 400
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Thêm sách vào bảng books
+        # ===== 7. Thêm sách vào bảng BOOKS =====
         cursor.execute("""
-            INSERT INTO books (Title, PublishYear, Language, DocumentType, author_id, category_id, email)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (title, publish_year, language, document_type, author_id, category_id, email_user))
+            INSERT INTO books 
+            (Title, Description, ISBN, PublishYear, Language, DocumentType, 
+             UploadedBy, IsPublic, image, file, publisher_id, category_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            title, description, isbn, publish_year, language, document_type,
+            email_user, is_public, imgpath, docum, publisher_id, category_id
+        ))
+        conn.commit()
+
+        # Lấy ID cuốn sách vừa thêm
+        book_id = cursor.lastrowid
+
+        # ===== 8. Thêm vào bảng BOOK_AUTHORS =====
+        for author_id in author_ids:
+            cursor.execute("""
+                INSERT INTO book_authors (book_id, author_id)
+                VALUES (%s, %s)
+            """, (book_id, author_id))
+
         conn.commit()
 
         return jsonify({
             "status": 200,
             "success": True,
-            "message": "Thêm sách thành công."
+            "message": "Thêm sách thành công.",
+            "book_id": book_id
         }), 200
 
     except Exception as e:
@@ -857,6 +949,7 @@ def add_book_admin():
     finally:
         cursor.close()
         conn.close()
+
 
 @app.route("/api/edit_book_admin", methods=["POST"])
 def edit_book_admin():
@@ -888,7 +981,6 @@ def edit_book_admin():
     datauser = data.get("datauser")
     while isinstance(datauser, dict) and "datauser" in datauser:
         datauser = datauser.get("datauser")
-
     if not datauser:
         return jsonify({
             "success": False,
@@ -913,7 +1005,7 @@ def edit_book_admin():
         cursor.execute("""
             UPDATE books
             SET Title=%s, Description=%s, ISBN=%s, PublishYear=%s, Language=%s, DocumentType=%s,
-                publisher_id=%s, category_id=%s, UploadedBy=%s, image=%s, IsPublic=%s
+                publisher_id=%s, category_id=%s, UploadedBy=%s, image=%s, file=%s, IsPublic=%s
             WHERE books_id=%s
         """, (
             datauser.get("Title"),
@@ -926,6 +1018,7 @@ def edit_book_admin():
             datauser.get("category_id"),
             email_user,
             datauser.get("image"),
+            datauser.get("document"),
             datauser.get("IsPublic", 1),
             books_id
         ))
@@ -974,6 +1067,76 @@ def edit_book_admin():
         cursor.close()
         conn.close()
 
+@app.route("/api/view_count", methods=["POST"])
+def view_count():
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"success": False, "message": "Dữ liệu JSON không hợp lệ."}), 400
+
+    # ✅ 1. Kiểm tra API key
+    if data.get("api_key") != API_KEY:
+        return jsonify({
+            "success": False,
+            "message": "API key không hợp lệ."
+        }), 403
+
+    # ✅ 2. Lấy ID sách (SỬA ĐOẠN NÀY)
+    # Frontend gửi: { "datauser": { "books_id": 123 } }
+    # Nên ta cần lấy 'datauser' trước, hoặc fallback về 'data' nếu gửi phẳng
+    datauser = data.get("datauser", {}) 
+    
+    # Ưu tiên lấy từ datauser, nếu không có thì thử lấy trực tiếp từ root data
+    books_id = datauser.get("books_id") if datauser else data.get("books_id")
+
+
+    if not books_id:
+        return jsonify({
+            "success": False,
+            "message": "Thiếu books_id."
+        }), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ 3. Tăng view_count
+        cursor.execute("""
+            UPDATE books 
+            SET view_count = view_count + 1 
+            WHERE books_id = %s
+        """, (books_id,))
+        
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({
+                "success": False, 
+                "message": "Không tìm thấy sách với ID này."
+            }), 404
+
+        # ✅ 4. Lấy số view mới trả về
+        cursor.execute("SELECT view_count FROM books WHERE books_id = %s", (books_id,))
+        result = cursor.fetchone()
+        new_view_count = result['view_count'] if result else 0
+
+        return jsonify({
+            "success": True,
+            "message": "Đã tăng lượt xem thành công.",
+            "view_count": new_view_count
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": f"Lỗi máy chủ: {str(e)}"
+        }), 500
+
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @app.route("/api/get_authors_and_categories", methods=["POST"])
@@ -2982,7 +3145,7 @@ def edit_borrow_return():
         }), 400
     except Exception as e:
         conn.rollback()
-        print(e)
+ 
         return jsonify({
             "status": 500,
             "success": False,
@@ -3305,6 +3468,62 @@ def get_statistics():
         conn.close()
 
 
+@app.route("/api/update_book_filepath", methods=["POST"])
+def update_book_filepath():
+    data = request.get_json()
+
+    # 1. API key check
+    if data.get("api_key") != API_KEY:
+        return jsonify({"success": False, "message": "API key không hợp lệ."}), 403
+
+    # 2. Token decoding and role check
+    token = data.get("token")
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        if role_id not in [1, 2]:
+            return jsonify({"success": False, "message": "Bạn không có quyền cập nhật sách."}), 403
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Lỗi token: {e}"}), 401
+
+    # 3. Get data from datauser
+    datauser = data.get("datauser")
+    if not datauser:
+        return jsonify({"success": False, "message": "Thiếu dữ liệu datauser."}), 400
+
+    books_id = datauser.get("books_id")
+    image_path = datauser.get("image")
+    file_path = datauser.get("file")
+
+    if not books_id:
+        return jsonify({"success": False, "message": "Thiếu books_id."}), 400
+    
+    if not image_path and not file_path:
+        return jsonify({"success": False, "message": "Thiếu đường dẫn file (image hoặc file)."}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if image_path:
+            cursor.execute("UPDATE books SET image = %s WHERE books_id = %s", (image_path, books_id))
+        
+        if file_path:
+            cursor.execute("UPDATE books SET file = %s WHERE books_id = %s", (file_path, books_id))
+
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({"success": False, "message": "Không tìm thấy sách với ID này."}), 404
+
+        return jsonify({"success": True, "message": "Cập nhật đường dẫn file thành công."}), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": f"Lỗi server: {str(e)}"}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
 
 
 if __name__ == "__main__":
