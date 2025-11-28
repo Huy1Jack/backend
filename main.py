@@ -685,6 +685,7 @@ def get_book_admin():
                 b.UploadedBy,
                 b.IsPublic,
                 b.image,
+                b.file,
                 b.publisher_id,
                 b.category_id,
                 c.category_name,
@@ -824,11 +825,11 @@ def del_book_admin():
         cursor.close()
         conn.close()
 
-@app.route("/api/add_book_adm", methods=["POST"])
+@app.route("/api/add_book_admin", methods=["POST"])
 def add_book_admin():
     data = request.get_json()
 
-    # ===== 1. Kiểm tra API key =====
+    # ===== 1. KIỂM TRA API KEY =====
     if data.get("api_key") != API_KEY:
         return jsonify({
             "status": 403,
@@ -836,7 +837,7 @@ def add_book_admin():
             "message": "API key không hợp lệ"
         }), 403
 
-    # ===== 2. Lấy dữ liệu datauser =====
+    # ===== 2. LẤY datauser =====
     datauser = data.get("datauser")
     if not datauser:
         return jsonify({
@@ -845,28 +846,25 @@ def add_book_admin():
             "message": "Thiếu dữ liệu datauser."
         }), 400
 
+    # ===== 3. GIẢI MÃ TOKEN =====
     token = data.get("token")
-    email_user = None
-    role_id = None
-
-    # ===== 3. Giải mã token =====
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-            email_user = decoded.get("email")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
-    else:
+    if not token:
         return jsonify({
             "status": 401,
             "success": False,
             "message": "Thiếu token xác thực."
         }), 401
 
-    # ===== 4. Chỉ role 1 và 2 được phép thêm sách =====
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+        email_user = decoded.get("email")
+    except jwt.ExpiredSignatureError:
+        return jsonify({"success": False, "message": "Token hết hạn."}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
+
+    # ===== 4. QUYỀN THÊM SÁCH =====
     if role_id not in [1, 2]:
         return jsonify({
             "status": 403,
@@ -874,7 +872,7 @@ def add_book_admin():
             "message": "Bạn không có quyền thêm sách."
         }), 403
 
-    # ===== 5. Lấy thông tin sách từ body =====
+    # ===== 5. LẤY THÔNG TIN SÁCH =====
     title = datauser.get("Title")
     description = datauser.get("Description")
     isbn = datauser.get("ISBN")
@@ -883,12 +881,12 @@ def add_book_admin():
     document_type = datauser.get("DocumentType")
     publisher_id = datauser.get("publisher_id")
     category_id = datauser.get("category_id")
-    author_ids = datauser.get("author_ids")  # LIST
+    author_ids = datauser.get("author_ids")
     imgpath = datauser.get("image")
     docum = datauser.get("file")
-    is_public = datauser.get("IsPublic", 1)
+    is_public = int(datauser.get("IsPublic", 1))
 
-    # ===== 6. Kiểm tra dữ liệu bắt buộc =====
+    # ===== 6. KIỂM TRA DỮ LIỆU BẮT BUỘC =====
     if not all([title, publish_year, language, document_type, publisher_id, category_id, imgpath, docum]):
         return jsonify({
             "status": 400,
@@ -903,26 +901,27 @@ def add_book_admin():
             "message": "author_ids phải là danh sách chứa ít nhất 1 tác giả."
         }), 400
 
+    # ===== 7. KẾT NỐI DB =====
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ===== 7. Thêm sách vào bảng BOOKS =====
+        # ===== 8. THÊM SÁCH VÀO BOOKS =====
         cursor.execute("""
             INSERT INTO books 
-            (Title, Description, ISBN, PublishYear, Language, DocumentType, 
-             UploadedBy, IsPublic, image, file, publisher_id, category_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (Title, Description, ISBN, PublishYear, Language, DocumentType, 
+                 UploadedBy, IsPublic, image, file, publisher_id, category_id)
+            VALUES 
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             title, description, isbn, publish_year, language, document_type,
             email_user, is_public, imgpath, docum, publisher_id, category_id
         ))
+
         conn.commit()
+        book_id = cursor.lastrowid  # Lấy ID sách mới
 
-        # Lấy ID cuốn sách vừa thêm
-        book_id = cursor.lastrowid
-
-        # ===== 8. Thêm vào bảng BOOK_AUTHORS =====
+        # ===== 9. THÊM TÁC GIẢ SÁCH =====
         for author_id in author_ids:
             cursor.execute("""
                 INSERT INTO book_authors (book_id, author_id)
@@ -949,6 +948,7 @@ def add_book_admin():
     finally:
         cursor.close()
         conn.close()
+
 
 
 @app.route("/api/edit_book_admin", methods=["POST"])
@@ -1018,7 +1018,7 @@ def edit_book_admin():
             datauser.get("category_id"),
             email_user,
             datauser.get("image"),
-            datauser.get("document"),
+            datauser.get("file"),
             datauser.get("IsPublic", 1),
             books_id
         ))
@@ -1037,7 +1037,7 @@ def edit_book_admin():
         cursor.execute("""
             SELECT 
                 b.books_id, b.Title, b.Description, b.ISBN, b.PublishYear, b.Language,
-                b.DocumentType, b.UploadDate, b.UploadedBy, b.IsPublic, b.image,
+                b.DocumentType, b.UploadDate, b.UploadedBy, b.IsPublic, b.image, b.file,
                 c.category_name, p.publisher_name,
                 GROUP_CONCAT(a.author_name SEPARATOR ', ') AS authors
             FROM books b
@@ -3554,6 +3554,90 @@ def update_book_filepath():
         cursor.close()
         conn.close()
 
+
+@app.route("/api/get_profile", methods=["POST"])
+def get_profile():
+    data = request.get_json()
+
+    # 1. Kiểm tra API key
+    if data.get("api_key") != API_KEY:
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "API key không hợp lệ"
+        }), 403
+
+    token = data.get("token")
+    email_user = None
+
+    # 2. Giải mã token để xác định người dùng
+    if token:
+        try:
+            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            email_user = decoded.get("email")
+        except jwt.ExpiredSignatureError:
+            return jsonify({
+                "status": 401,
+                "success": False,
+                "message": "Token hết hạn."
+            }), 401
+        except jwt.InvalidTokenError:
+            return jsonify({
+                "status": 401,
+                "success": False,
+                "message": "Token không hợp lệ."
+            }), 401
+    else:
+        return jsonify({
+            "status": 401,
+            "success": False,
+            "message": "Thiếu token xác thực."
+        }), 401
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # 3. Truy vấn dữ liệu theo bảng users
+        # Lưu ý: KHÔNG select cột 'pass' để bảo mật
+        query = """
+            SELECT 
+                id, 
+                name, 
+                email, 
+                role, 
+                borrow_count, 
+                late_count, 
+                created_at 
+            FROM users 
+            WHERE email = %s
+        """
+        cursor.execute(query, (email_user,))
+        user_data = cursor.fetchone()
+
+        if user_data:
+            return jsonify({
+                "status": 200,
+                "success": True,
+                "data": user_data
+            }), 200
+        else:
+            return jsonify({
+                "status": 404,
+                "success": False,
+                "message": "Không tìm thấy thông tin người dùng."
+            }), 404
+
+    except Exception as e:
+        return jsonify({
+            "status": 500,
+            "success": False,
+            "message": f"Lỗi máy chủ: {str(e)}"
+        }), 500
+
+    finally:
+        cursor.close()
+        conn.close()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, debug=DEBUG)
