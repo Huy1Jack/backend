@@ -153,6 +153,99 @@ def register():
         "role": 3
     })
 
+@app.route("/api/change_password", methods=["POST"])
+def change_password():
+    data = request.get_json()
+    dataueser = data.get("datauser", {})
+    # Kiểm tra API key
+    if data.get("api_key") != API_KEY:
+        return jsonify({
+            "status": 403,
+            "success": False,
+            "message": "API key không hợp lệ."
+        }), 403
+
+    # Nhận dữ liệu
+    token = data.get("token")
+    old_password = dataueser.get("old_password")
+    new_password = dataueser.get("new_password")
+    
+    if not token or not old_password or not new_password:
+        return jsonify({
+            "status": 400,
+            "success": False,
+            "message": "Thiếu token, mật khẩu cũ hoặc mật khẩu mới."
+        }), 400
+
+    # Giải mã token
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user_id = decoded.get("id")
+    except jwt.ExpiredSignatureError:
+        return jsonify({
+            "status": 401,
+            "success": False,
+            "message": "Token hết hạn."
+        }), 401
+    except jwt.InvalidTokenError:
+        return jsonify({
+            "status": 401,
+            "success": False,
+            "message": "Token không hợp lệ."
+        }), 401
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # Lấy mật khẩu trong DB
+        cursor.execute("SELECT pass FROM users WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({
+                "status": 404,
+                "success": False,
+                "message": "Không tìm thấy người dùng."
+            }), 404
+
+        stored_password = user["pass"]
+
+        # So sánh mật khẩu cũ (sử dụng hàm hash của bạn)
+        if hhuy.hash_key(old_password) != stored_password:
+            return jsonify({
+                "status": 400,
+                "success": False,
+                "message": "Mật khẩu cũ không đúng."
+            }), 400
+
+        # Mã hóa mật khẩu mới
+        new_hashed = hhuy.hash_key(new_password)
+
+        # Cập nhật mật khẩu vào DB
+        cursor.execute("""
+            UPDATE users SET pass = %s WHERE id = %s
+        """, (new_hashed, user_id))
+        conn.commit()
+
+        return jsonify({
+            "status": 200,
+            "success": True,
+            "message": "Đổi mật khẩu thành công."
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({
+            "status": 500,
+            "success": False,
+            "message": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+
 
 
 @app.route("/api/forgot_password", methods=["POST"])
@@ -1128,7 +1221,6 @@ def view_count():
 
     except Exception as e:
         conn.rollback()
-        print(f"Error: {str(e)}")
         return jsonify({
             "success": False,
             "message": f"Lỗi máy chủ: {str(e)}"
