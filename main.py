@@ -1630,6 +1630,7 @@ def edit_email_admin():
 
     #   Lấy dữ liệu người dùng gửi lên
     datauser = data.get("datauser")
+    datauser = datauser.get("datauser")
     if not datauser:
         return jsonify({
             "status": 400,
@@ -1705,36 +1706,36 @@ def edit_email_admin():
 
 @app.route("/api/edit_role_admin", methods=["POST"])
 def edit_role_admin():
-    data = request.get_json()
+    body = request.get_json()
 
-    # 1️⃣ Kiểm tra API key
-    if data.get("api_key") != API_KEY:
+    # ===== 1. Check API key =====
+    api_key = body.get("api_key")
+    if api_key != API_KEY:
         return jsonify({
-            "status": 403,
+            "status": 403, 
             "success": False,
             "message": "API key không hợp lệ"
         }), 403
 
-    # 2️⃣ Giải mã token
-    token = data.get("token")
-    role_id = None
-
-    if token:
-        try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            role_id = decoded.get("role")
-        except jwt.ExpiredSignatureError:
-            return jsonify({"success": False, "message": "Token hết hạn."}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
-    else:
+    # ===== 2. Decode token =====
+    token = body.get("token")
+    print("TOKEN:", token)
+    if not token:
         return jsonify({
             "status": 401,
             "success": False,
             "message": "Thiếu token xác thực."
         }), 401
+    
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        role_id = decoded.get("role")
+    except jwt.ExpiredSignatureError:
+        return jsonify({"success": False, "message": "Token hết hạn."}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"success": False, "message": "Token không hợp lệ."}), 401
 
-    # 3️⃣ Chỉ role_id = 1 được phép chỉnh sửa role
+    # ===== 3. Chỉ admin (role = 1) mới được sửa =====
     if role_id != 1:
         return jsonify({
             "status": 403,
@@ -1742,8 +1743,10 @@ def edit_role_admin():
             "message": "Bạn không có quyền thay đổi role người dùng."
         }), 403
 
-    # 4️⃣ Lấy dữ liệu
-    datauser = data.get("datauser")
+    # ===== 4. Lấy datauser =====
+    datauser = body.get("datauser")
+    datauser = datauser.get("datauser")
+    print("DATAUSER:", datauser)
     if not datauser:
         return jsonify({
             "status": 400,
@@ -1753,7 +1756,7 @@ def edit_role_admin():
 
     email = datauser.get("email")
     new_role = datauser.get("newRole")
-
+    print(email, new_role)
     if not email or new_role is None:
         return jsonify({
             "status": 400,
@@ -1761,7 +1764,7 @@ def edit_role_admin():
             "message": "Thiếu email hoặc role mới."
         }), 400
 
-    # 5️⃣ Không cho phép đổi quyền tài khoản đặc biệt
+    # ===== 5. Khóa tài khoản hệ thống =====
     if email == "hhuydhv@gmail.com":
         return jsonify({
             "status": 403,
@@ -1773,10 +1776,9 @@ def edit_role_admin():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # 6️⃣ Kiểm tra user có tồn tại
+        # ===== 6. Check user tồn tại =====
         cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
         user = cursor.fetchone()
-
         if not user:
             return jsonify({
                 "status": 404,
@@ -1784,7 +1786,7 @@ def edit_role_admin():
                 "message": "Không tìm thấy người dùng."
             }), 404
 
-        # 7️⃣ Không được thay đổi nếu role cũ == role mới
+        # ===== 7. Role mới phải khác role cũ =====
         if user["role"] == new_role:
             return jsonify({
                 "status": 400,
@@ -1792,19 +1794,18 @@ def edit_role_admin():
                 "message": "Quyền mới phải khác quyền hiện tại."
             }), 400
 
-        # 8️⃣ Nếu user này đang là admin → kiểm tra xem còn admin nào khác không
+        # ===== 8. Nếu user đang là admin → kiểm tra còn admin khác không =====
         if user["role"] == 1:
             cursor.execute("SELECT COUNT(*) AS total FROM users WHERE role = 1")
             admin_count = cursor.fetchone()["total"]
-
             if admin_count <= 1:
                 return jsonify({
                     "status": 403,
                     "success": False,
-                    "message": "Hệ thống phải có ít nhất 1 tài khoản Admin. Không thể thay đổi role của admin duy nhất."
+                    "message": "Hệ thống phải có ít nhất 1 tài khoản Admin."
                 }), 403
 
-        # 9️⃣ Cập nhật role
+        # ===== 9. Update role =====
         cursor.execute("UPDATE users SET role = %s WHERE email = %s", (new_role, email))
         conn.commit()
 
@@ -1813,14 +1814,6 @@ def edit_role_admin():
             "success": True,
             "message": "Cập nhật role thành công."
         }), 200
-
-    except Exception as e:
-        conn.rollback()
-        return jsonify({
-            "status": 500,
-            "success": False,
-            "message": f"Lỗi server: {str(e)}"
-        }), 500
 
     finally:
         cursor.close()
@@ -1875,7 +1868,8 @@ def edit_pass_admin():
         }), 403
 
     #   Lấy dữ liệu người dùng cần cập nhật
-    datauser = data.get("datauser", {})
+    datauser = data.get("datauser")
+    datauser = datauser.get("datauser")
     email = datauser.get("email")
     new_pass = datauser.get("newPassword")
 
